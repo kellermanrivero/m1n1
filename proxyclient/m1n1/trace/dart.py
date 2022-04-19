@@ -32,7 +32,7 @@ class DARTTracer(ADTDevTracer):
         self.dart = DART(self.hv.iface, self.regs, compat=self.dev.compatible[0])
 
 
-    def w_STREAM_COMMAND(self, stream_command):
+    def w_STREAM_COMMAND(self, evt, stream_command):
         if stream_command.INVALIDATE:
             self.log(f"Invalidate Stream: {self.regs.cached.STREAM_SELECT.reg}")
             self.dart.invalidate_cache()

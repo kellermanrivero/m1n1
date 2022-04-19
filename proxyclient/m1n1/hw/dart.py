@@ -8,6 +8,8 @@ from ..malloc import Heap
 
 __all__ = ["DARTRegs", "DART"]
 
+MAX_SID = 16
+
 class R_ERROR(Register32):
     FLAG = 31
     STREAM = 27, 24
@@ -74,8 +76,8 @@ class DARTRegs(RegMap):
     UNK1            = 0xf8, Register32
     ENABLED_STREAMS = 0xfc, Register32
 
-    TCR             = irange(0x100, 16, 4), R_TCR
-    TTBR            = (irange(0x200, 16, 16), range(0, 16, 4)), R_TTBR
+    TCR             = irange(0x100, MAX_SID, 4), R_TCR
+    TTBR            = (irange(0x200, MAX_SID, 16), range(0, 16, 4)), R_TTBR
 
 PTE_TYPES = {
     "dart,t8020": PTE_T8020,
@@ -102,7 +104,7 @@ class DART(Reloadable):
         self.pt_cache = {}
         self.enabled_streams = regs.ENABLED_STREAMS.val
         self.iova_allocator = [Heap(iova_range[0], iova_range[1], self.PAGE_SIZE)
-                               for i in range(16)]
+                               for i in range(MAX_SID)]
         self.ptecls = PTE_TYPES[compat]
 
     @classmethod
@@ -299,11 +301,11 @@ class DART(Reloadable):
         self.iface.writemem(addr, struct.pack(f"<{self.Lx_SIZE}Q", *self.pt_cache[addr]))
 
     def initialize(self):
-        for i in range(15):
+        for i in range(MAX_SID - 1):
             self.regs.TCR[i].reg = R_TCR(TRANSLATE_ENABLE=1)
-        self.regs.TCR[15].reg = R_TCR(BYPASS_DART=1)
+        self.regs.TCR[MAX_SID].reg = R_TCR(BYPASS_DART=1)
 
-        for i in range(16):
+        for i in range(MAX_SID):
             for j in range(4):
                 self.regs.TTBR[i, j].reg = R_TTBR(VALID = 0)
 
@@ -418,5 +420,5 @@ class DART(Reloadable):
             print("  mode: UNKNOWN")
 
     def dump_all(self):
-        for i in range(16):
+        for i in range(MAX_SID):
             self.dump_device(i)

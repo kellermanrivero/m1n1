@@ -105,23 +105,23 @@ class BaseASCTracer(ADTDevTracer):
 
     ENDPOINTS = {}
 
-    def w_OUTBOX_CTRL(self, val):
+    def w_OUTBOX_CTRL(self, evt, val):
         self.log(f"OUTBOX_CTRL = {val!s}")
 
-    def w_INBOX_CTRL(self, val):
+    def w_INBOX_CTRL(self, evt, val):
         self.log(f"INBOX_CTRL = {val!s}")
 
-    def w_CPU_CONTROL(self, val):
+    def w_CPU_CONTROL(self, evt, val):
         self.log(f"CPU_CONTROL = {val!s}")
 
-    def w_INBOX1(self, inbox1):
+    def w_INBOX1(self, evt, inbox1):
         inbox0 = self.asc.cached.INBOX0.reg
         if self.verbose >= 2:
             self.log(f"SEND: {inbox0.value:016x}:{inbox1.value:016x} " +
                     f"{inbox0.str_fields()} | {inbox1.str_fields()}")
         self.handle_msg(DIR.TX, inbox0, inbox1)
 
-    def r_OUTBOX1(self, outbox1):
+    def r_OUTBOX1(self, evt, outbox1):
         outbox0 = self.asc.cached.OUTBOX0.reg
         if self.verbose >= 2:
             self.log(f"RECV: {outbox0.value:016x}:{outbox1.value:016x} " +

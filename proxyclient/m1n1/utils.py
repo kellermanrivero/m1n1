@@ -811,7 +811,7 @@ class RegMap(Reloadable, metaclass=RegMapMeta):
         if index is not None:
             return f"{name}[{index}]"
         else:
-            return name
+            return f"{name}"
 
     @classmethod
     def lookup_name(cls, name):

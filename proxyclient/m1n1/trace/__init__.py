@@ -62,6 +62,8 @@ class Tracer(Reloadable):
         self.state = TracerState()
         self.init_state()
         self._cache = RegCache(hv)
+        self._record_memory_access = False
+        self._access_counter = {}
         cache = hv.tracer_caches.get(self.ident, None)
         if cache is not None:
             self._cache.cache.update(cache.get("regcache", {}))
@@ -83,7 +85,13 @@ class Tracer(Reloadable):
     def evt_rw(self, evt, regmap=None, prefix=None):
         self._cache.update(evt.addr, evt.data)
         reg = rcls = None
-        value = evt.data
+        value = evt.data 
+
+        if self._record_memory_access:
+            if hex(evt.addr) in self._access_counter:
+                self._access_counter[hex(evt.addr)] = self._access_counter[hex(evt.addr)] + 1
+            else:
+                self._access_counter[hex(evt.addr)] = 1
 
         t = "w" if evt.flags.WRITE else "r"
 
@@ -98,7 +106,7 @@ class Tracer(Reloadable):
             else:
                 s = f"{regmap.get_name(evt.addr)} = {value!s}"
             m = "+" if evt.flags.MULTI else " "
-            self.log(f"MMIO: {t.upper()}.{1<<evt.flags.WIDTH:<2}{m} " + s)
+            self.log(f"[{prefix}] MMIO: {t.upper()}.{1<<evt.flags.WIDTH:<2}{m} " + s)
 
         if reg is not None:
             if prefix is not None:
@@ -108,13 +116,13 @@ class Tracer(Reloadable):
             handler = getattr(self, attr, None)
             if handler:
                 if index is not None:
-                    handler(value, index)
+                    handler(evt, value, index)
                 else:
-                    handler(value)
+                    handler(evt, value)
             elif self.verbose == 2:
                 s = f"{regmap.get_name(evt.addr)} = {value!s}"
                 m = "+" if evt.flags.MULTI else " "
-                self.log(f"MMIO: {t.upper()}.{1<<evt.flags.WIDTH:<2}{m} " + s)
+                self.log(f"[{prefix}] MMIO: {t.upper()}.{1<<evt.flags.WIDTH:<2}{m} " + s)
 
     def trace(self, start, size, mode, read=True, write=True, **kwargs):
         zone = irange(start, size)
@@ -144,6 +152,20 @@ class Tracer(Reloadable):
 
     def log(self, msg):
         self.hv.log(f"[{self.ident}] {msg}")
+
+    def collect_memory_access(self):
+        self._record_memory_access = True
+        self._access_counter = {}
+
+    def dump_memory_access(self, min = None):
+        if self._record_memory_access:
+            print("Access counter:\n")
+            sort_access_counters = sorted(self._access_counter.items(), key=lambda x: x[1], reverse=True)
+            for i in sort_access_counters:
+                if min and i[1] > min:
+	                print(i[0], i[1])
+                else:
+	                print(i[0], i[1])
 
 class PrintTracer(Tracer):
     def __init__(self, hv, device_addr_tbl):
@@ -184,6 +206,7 @@ class ADTDevTracer(Tracer):
     def start(self):
         for i in range(len(self.dev.reg)):
             if i >= len(self.REGMAPS) or (regmap := self.REGMAPS[i]) is None:
+                self.hv.log('i = ' + str(i) + ", len(REGMAP) = " + str(len(self.REGMAPS)) + ", regmap = " + str(regmap))
                 continue
             prefix = name = None
             if i < len(self.NAMES):
@@ -192,7 +215,9 @@ class ADTDevTracer(Tracer):
                 prefix = self.PREFIXES[i]
 
             start, size = self.dev.get_reg(i)
+            self.hv.log('name = ' + str(name) + " , prefix = " + str(prefix))
             self.trace_regmap(start, size, regmap, name=name, prefix=prefix)
+        
 
 __all__.extend(k for k, v in globals().items()
                if (callable(v) or isinstance(v, type)) and v.__module__.startswith(__name__))
