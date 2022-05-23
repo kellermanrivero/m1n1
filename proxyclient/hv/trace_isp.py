@@ -66,8 +66,8 @@ class ISPRegs(RegMap):
     ISP_CPU_STATUS          = 0x0004, Register32
     ISP_REVISION            = 0x1800000, ISP_REVISION
     ISP_POWER_UNKNOWN       = 0x20e0080, Register32
-    IRQ_INTERRUPT           = 0x2104000, Register32
-    IRQ_INTERRUPT_ACK       = 0x2104004, Register32
+    ISP_IRQ_INTERRUPT       = 0x2104000, Register32
+    ISP_IRQ_INTERRUPT_ACK   = 0x2104004, Register32
     ISP_SENSOR_REF_CLOCK    = irange(0x2104190, 3, 4), Register32
     ISP_GPR0                = 0x2104170, Register32
     ISP_GPR1                = 0x2104174, Register32
@@ -81,25 +81,25 @@ class ISPRegs(RegMap):
     ISP_DOORBELL_RING0      = 0x21043f0, Register32
     ISP_DOORBELL_RING1      = 0x21043fc, Register32
 
-    SMBUS_REG_MTXFIFO       = irange(0x2110000, 4, 0x1000), Register32
-    SMBUS_REG_MRXFIFO       = irange(0x2110004, 4, 0x1000), Register32
-    SMBUS_REG_UNK_1         = irange(0x2110008, 4, 0x1000), Register32
-    SMBUS_REG_UNK_2         = irange(0x211000c, 4, 0x1000), Register32
-    SMBUS_REG_UNK_3         = irange(0x2110010, 4, 0x1000), Register32
-    SMBUS_REG_SMSTA         = irange(0x2110014, 4, 0x1000), Register32
-    SMBUS_REG_UNK_4         = irange(0x2110018, 4, 0x1000), Register32
-    SMBUS_REG_CTL           = irange(0x211001c, 4, 0x1000), Register32
-    SMBUS_REG_UNK_5         = irange(0x2110020, 4, 0x1000), Register32
-    SMBUS_REG_UNK_6         = irange(0x2110024, 4, 0x1000), Register32
-    SMBUS_REG_REV           = irange(0x2110028, 4, 0x1000), Register32
-    SMBUS_REG_UNK_7         = irange(0x211002c, 4, 0x1000), Register32
-    SMBUS_REG_UNK_8         = irange(0x2110030, 4, 0x1000), Register32
-    SMBUS_REG_UNK_9         = irange(0x2110034, 4, 0x1000), Register32
-    SMBUS_REG_UNK_A         = irange(0x2110038, 4, 0x1000), Register32
-    SMBUS_REG_UNK_B         = irange(0x211003c, 4, 0x1000), Register32
+    ISP_SMBUS_REG_MTXFIFO   = irange(0x2110000, 4, 0x1000), Register32
+    ISP_SMBUS_REG_MRXFIFO   = irange(0x2110004, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_1     = irange(0x2110008, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_2     = irange(0x211000c, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_3     = irange(0x2110010, 4, 0x1000), Register32
+    ISP_SMBUS_REG_SMSTA     = irange(0x2110014, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_4     = irange(0x2110018, 4, 0x1000), Register32
+    ISP_SMBUS_REG_CTL       = irange(0x211001c, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_5     = irange(0x2110020, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_6     = irange(0x2110024, 4, 0x1000), Register32
+    ISP_SMBUS_REG_REV       = irange(0x2110028, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_7     = irange(0x211002c, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_8     = irange(0x2110030, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_9     = irange(0x2110034, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_A     = irange(0x2110038, 4, 0x1000), Register32
+    ISP_SMBUS_REG_UNK_B     = irange(0x211003c, 4, 0x1000), Register32
 
-    DPE_REG_UNK1            = 0x2504000, Register32
-    DPE_REG_UNK2            = 0x2508000, Register32
+    ISP_DPE_REG_UNK1        = 0x2504000, Register32
+    ISP_DPE_REG_UNK2        = 0x2508000, Register32
 
     ISP_CPU_BUFFER          = 0x1050000, Register32
 
@@ -214,26 +214,38 @@ class ISPTracer(ADTDevTracer):
             self.log(f"ISP_IPC_CHANNEL_TABLE_IOVA = {val!s}")
             self.channel_table_iova = val.value
             self.channel_list = []
+            self.channel_cache = []
             if self.dart:
                 ch_tbl = self.dart.ioread(0, val.value & 0xFFFFFFFF, self.number_of_channels * self.channel_table_entry_length)
                 self.log("======== CHANNEL TABLE ========")
+                ch_idx = 0
                 for ch_offset in range(0, self.number_of_channels * self.channel_table_entry_length, self.channel_table_entry_length):
                     ch_entry_bytes =  ch_tbl[ch_offset: ch_offset + self.channel_table_entry_length]
                     ch_name, ch_source, ch_type, ch_size, ch_addr = struct.unpack('<32s32x2I2q168x', ch_entry_bytes) 
                     ch_entry = ISPIPCChannel(ch_name, ch_source, ch_type, ch_size, ch_addr)
                     self.channel_list.append(ch_entry)
+                    self.channel_cache.append(None)
                     self.log(f'{str(ch_entry)}')
 
     def r_IRQ_INTERRUPT(self, evt, val):
-        if self.channel_list and len(self.channel_list) > 0:
-            for channel in self.channel_list:
-                self.log(f"{channel.name}: {chexdump(self.dart.ioread(0, channel.address, channel.size))}")
+        self.dump_ipc_channel(1)
+
+    def w_ISP_DOORBELL_RING0(self, evt, val):
+        self.dump_ipc_channel(1)
+
+    def w_ISP_DOORBELL_RING1(self, evt, val):
+        pass
 
     def w_ISP_GPR0(self, evt, val):
         self.log(f"ISP_GPR0 = ({val!s})")
         if val.value == 0x1812f80:
             if self.dart:
                 self.init_struct = self.dart.ioread(0, val.value & 0xFFFFFFFF, 0x190)
+
+    def w_IRQ_INTERRUPT(self, evt, val):
+        self.log(f"IRQ_INTERRUPT = ({val!s}).")
+        if val.value == 0xf:
+            self.log(f"ISP Interrupts enabled")
 
     def w_INBOX_CTRL(self, evt, val):
         self.log(f"INBOX_CTRL = {val!s}")
@@ -277,6 +289,18 @@ class ISPTracer(ADTDevTracer):
             return self.dart.iowrite(0, dva & 0xFFFFFFFF, data)
         else:
             return self.hv.iface.writemem(dva, data)
+
+    def dump_ipc_channel(self, idx = 0):
+        if self.channel_list and len(self.channel_list) > 0:
+            channel = self.channel_list[idx]
+            if idx is 1:
+                cmd_iova = int.from_bytes(self.dart.ioread(0, channel.address, channel.size), "little")
+                cmd_contents = self.dart.ioread(0, cmd_iova, 0x8)
+                if cmd_contents != self.channel_cache[idx]:
+                    self.channel_cache[idx] = cmd_contents
+                    self.log(f"{channel.name}: [CMD Addr: {hex(cmd_iova)} -> Value: {hexdump(cmd_contents)}]")
+            else:
+                self.log(f"{channel.name}: {hexdump(self.dart.ioread(0, channel.address, channel.size))}")
 
     def start(self):
         super().start()
