@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 from collections import namedtuple
+from enum import IntEnum
 from m1n1 import asm
 from m1n1.trace import Tracer
 from m1n1.utils import *
@@ -33,12 +34,6 @@ MDARTTracer = MDARTTracer._reloadcls()
 ## 0x22c0f8000 (SMMU           , idx = 4)
 ## 0x22c0fc000 (DART           , idx = 2)
 
-## chexdump(isp_dart_tracer.regs[0][1].ioread(0, 0x9228000, 0x3fd0))
-## chexdump(isp_dart_tracer.regs[0][1].ioread(0, 0x1824000, 35651584))
-## chexdump(isp_dart_tracer.regs[0][1].ioread(0, 0x1804000, 16536))
-## chexdump(isp_dart_tracer.regs[1][1].ioread(0, 0x3A28000, 0x8000)) 
-## chexdump(isp_dart_tracer.regs[1][1].ioread(0, 0x3A28000, 0x18000)) --> SYSLOG
-
 class ISPCommand:
     def __init__(self, message):
         value, u0, u1 = struct.unpack('<3q40x', message.data)
@@ -60,20 +55,38 @@ class ISPCommand:
         self.tracer.log(f"[{self.channel.name}]({self.message.index}): {message}")
 
 class ISPTerminalCommand(ISPCommand):
+    # ISP sends buffer address at beginning
+    BUFFER_ADDRESS = None
+    # It seems messages are capped to 100 bytes
+    MAX_BUFFER_SIZE = 0x80 
+
+    @staticmethod
+    def set_address(address):
+        if address != 0:
+            ISPTerminalCommand.BUFFER_ADDRESS = address
+
+    @staticmethod
+    def move_cursor():
+        if ISPTerminalCommand.BUFFER_ADDRESS:
+            ISPTerminalCommand.BUFFER_ADDRESS += ISPTerminalCommand.MAX_BUFFER_SIZE
+        else:
+            return None
+
     def __init__(self, message):
         super().__init__(message)
-        self.buffer_address = self.value
-        self.buffer_length = self.arg0
-        if self.buffer_address != 0:
-            self.buffer_message = self.read_iova(self.buffer_address, self.buffer_length)
-        else:
-            self.buffer_message = None
+
+        ## Set buffer address
+        ISPTerminalCommand.set_address(self.value)
+
+        ## Read contents 
+        self.buffer_message = self.read_iova(ISPTerminalCommand.BUFFER_ADDRESS, self.arg0)
+
+        ## Move cursor
+        ISPTerminalCommand.move_cursor()
+
 
     def dump(self):
-        if self.buffer_address != 0:
-            self.log(f"[A: {hex(self.buffer_address)}, L: {hex(self.buffer_length)}, ISPCPU: {self.buffer_message.decode()}]")
-        else:
-            self.log(f"[A: {hex(self.buffer_address)}, L: {hex(self.buffer_length)}]")
+        self.log(f"ISPCPU: {self.buffer_message}]")
 
 class ISPIOCommand(ISPCommand):
     def __init__(self, message):
@@ -87,8 +100,21 @@ class ISPIOCommand(ISPCommand):
 
     def dump(self):
         if self.iova != 0:
-            chexdump(self.read_iova(self.iova, 0x100))
             self.log(f"[IO Addr: {hex(self.iova)} -> Opcode: {hex(self.contents >> 32)}]")
+
+class ISPT2HBufferCommand(ISPCommand):
+    def __init__(self, message):
+        super().__init__(message)
+        self.iova = self.value
+        if self.iova != 0:
+            contents = self.read_iova(self.iova, 0x8)
+            self.contents = int.from_bytes(contents, byteorder="little")
+        else:
+            self.contents = None
+
+    def dump(self):
+        if self.iova != 0:
+            chexdump(self.read_iova(self.iova, 0x40))
 
 class ISPSharedMallocCommand(ISPCommand):
     def __init__(self, message):
@@ -103,6 +129,9 @@ class ISPSharedMallocCommand(ISPCommand):
         else:
             self.log(f"[FW Free, Address: {hex(self.value)}, Length: {hex(self.size)}, Type: {hex(self.type)})]")
 
+class MessageLookupType(IntEnum):
+    LAST_READ   = 0
+    LAST_WRITE  = 1
 
 class ISPChannel:
     def __init__(self, tracer, name, _type, source, number_of_entries, entry_size, address):
@@ -114,11 +143,15 @@ class ISPChannel:
         self.entry_size = entry_size
         self.size = self.number_of_entries * self.entry_size
         self.address = address
-        self.entry_index = 0
+        self.doorbell = 1 << source
+        self.read_entry_index = 0
+        self.write_entry_index = 0
+        self.last_read_entry = None
+        self.last_write_entry = None
     
-    def get_commands(self):
+    def get_commands(self, lookup_type = MessageLookupType.LAST_READ):
         commands = []
-        message = self.get_message()
+        message = self.get_message(lookup_type)
         if message:
             command = message.get_command()
             if command:
@@ -131,20 +164,44 @@ class ISPChannel:
             s = s + "\t" + entry.dump() + "\n"
         self.tracer.log(s)
 
-    def get_message(self):
-        idx = 0
+    def get_message(self, lookup_type = MessageLookupType.LAST_READ):
+        message_index = 0
         entry = None
         channel_data = self.tracer.dart.ioread(0, self.address, self.size)
+        entry_index = self.read_entry_index
+        if lookup_type is MessageLookupType.LAST_WRITE:
+            entry_index = self.write_entry_index
         for i in range(0, self.size, self.entry_size):
-            if idx == self.entry_index:
+            if message_index == entry_index:
                 entry_data = channel_data[i: i + self.entry_size]
-                entry = ISPChannelMessage(idx, self, entry_data)
-                self.entry_index = self.entry_index + 1
+                ## This code is subceptible of be wrong if two messages are the same
+                if lookup_type is MessageLookupType.LAST_READ:
+                    if self.last_read_entry is None:
+                        self.last_read_entry = entry_data
+                    elif self.last_read_entry != entry_data:
+                        self.last_read_entry = entry_data
+                    else:
+                        break
+                else:
+                    if self.last_write_entry is None:
+                        self.last_write_entry = entry_data
+                    elif self.last_write_entry != entry_data:
+                        self.last_write_entry = entry_data
+                    else:
+                        break
+                entry = ISPChannelMessage(message_index, self, entry_data)
+                entry_index = entry_index + 1
                 break
-            idx = idx + 1
+            message_index = message_index + 1
         
-        if self.entry_index >= self.number_of_entries:
-            self.entry_index = 0
+        if entry_index >= self.number_of_entries:
+            entry_index = 0
+        
+        if lookup_type is MessageLookupType.LAST_READ:
+            self.read_entry_index = entry_index
+        else:
+            self.write_entry_index = entry_index
+
         return entry
 
     def get_all_messages(self):
@@ -159,7 +216,6 @@ class ISPChannel:
     def __str__(self):
         return f"[CH - {str(self.name)}] (src = {self.source!s}, type = {self.type!s}, size = {self.number_of_entries!s}, iova = {hex(self.address)!s})"
 
-    
 class ISPChannelMessage:
     def __init__(self, index, channel, data):
         self.index = index
@@ -167,20 +223,16 @@ class ISPChannelMessage:
         self.data = data
     
     def get_command(self):
-        cmd_value = struct.unpack('<1q56x', self.data)[0]
-        is_type_zero = 1 if self.channel.type == 0 else 0
-        #if (cmd_value & 1) == (is_type_zero & 1):
         if self.channel.name == "TERMINAL":
             return ISPTerminalCommand(self)
         elif self.channel.name == "IO":
             return ISPIOCommand(self)
         elif self.channel.name == "SHAREDMALLOC":
             return ISPSharedMallocCommand(self)
+        elif self.channel.name == "BUF_T2H":
+            return ISPT2HBufferCommand(self)
         else:
-            return None
-        # else:
-        #     self.channel.tracer.log(f"[{self.channel.name}] Warning, invalid command. Cmd value: {cmd_value}")
-        #     return None
+            return ISPCommand(self)
     
     def dump(self, raw = None):
         s = "ISP Message: {"
@@ -293,15 +345,23 @@ class ISPTracer(ADTDevTracer):
         #4: IOReporting,
     }
 
+    ALLOWED_CHANNELS = None
+    #ALLOWED_CHANNELS = ["TERMINAL"]
+
     def __init__(self, hv, dev_path, dart_dev_path, verbose):
         super().__init__(hv, dev_path, verbose)
 
         p.pmgr_adt_clocks_enable("/arm-io/dart-isp")
-        self.isp_dart_tracer = MDARTTracer(hv, "/arm-io/dart-isp", verbose=3)
-        self.isp_dart_tracer.start()
 
-        # Use DART0 by default
-        self.dart = self.isp_dart_tracer.regs[0][1]
+        # For multi-dart scenarios
+        # self.isp_dart_tracer = MDARTTracer(hv, "/arm-io/dart-isp", verbose=3)
+        # self.isp_dart_tracer.start()
+        # # Use DART0 by default
+        # self.dart = self.isp_dart_tracer.regs[0][1]
+
+        self.dart_tracer = DARTTracer(hv, "/arm-io/dart-isp")
+        self.dart_tracer.start()
+        self.dart = self.dart_tracer.dart
 
         self.ignored_ranges = [
             # -----------------------------------------------------------------
@@ -365,33 +425,20 @@ class ISPTracer(ADTDevTracer):
                     # 0x50 => Channel Addr
                     ch_name, ch_type, ch_source, ch_size, ch_addr = struct.unpack('<32s32x2I2q168x', ch_entry_bytes) 
                     ch_entry = ISPChannel(self, ch_name, ch_type, ch_source, ch_size, 0x40, ch_addr)
+                    if self.ALLOWED_CHANNELS and (ch_entry.name not in self.ALLOWED_CHANNELS):
+                        continue
                     self.channel_list.append(ch_entry)
                     self.log(f'{str(ch_entry)}')
 
     def r_ISP_IRQ_INTERRUPT(self, evt, val):
-        irq_id = val.value
-        cidx = 0
-        for channel in self.channel_list:
-            if (irq_id >> channel.type & 1) != 0:
-                for cmd in channel.get_commands():
-                    cmd.dump()
-                    #self.dump_ipc_channel(cidx)
-            cidx = cidx + 1 
+        pending_irq = int(val.value)
+        self.log(f"======== PENDING IRQ ({pending_irq})========")
+        self.get_last_read_command(pending_irq)
 
     def w_ISP_DOORBELL_RING0(self, evt, val):
-        value = val.value
-        if value is 1:
-            self.dump_ipc_channel(0)
-        elif value is 2:
-            self.dump_ipc_channel(1)
-            self.dump_ipc_channel(2)
-        elif value is 4:
-            self.dump_ipc_channel(3)
-        elif value is 8:
-            self.dump_ipc_channel(4)
-            self.dump_ipc_channel(5)
-            self.dump_ipc_channel(6)
-        pass
+        doorbell_value = int(val.value)
+        self.log(f"======== DOORBELL ({doorbell_value}) ========")
+        self.get_last_write_command(doorbell_value)
 
     def w_ISP_DOORBELL_RING1(self, evt, val):
         pass
@@ -406,8 +453,6 @@ class ISPTracer(ADTDevTracer):
         self.log(f"IRQ_INTERRUPT = ({val!s}).")
         if val.value == 0xf:
             self.log(f"ISP Interrupts enabled")
-            self.dump_ipc_channel(0)
-            self.dump_ipc_channel(1)
 
     def w_INBOX_CTRL(self, evt, val):
         self.log(f"INBOX_CTRL = {val!s}")
@@ -456,6 +501,37 @@ class ISPTracer(ADTDevTracer):
         if self.channel_list and len(self.channel_list) > 0:
             channel = self.channel_list[idx]
             channel.dump()
+
+    def get_last_write_command(self, doorbell_value):
+        if self.channel_list and len(self.channel_list) > 0:
+            channel_names = []
+            channel_cmds = []
+            for channel in self.channel_list:
+                if channel.doorbell == doorbell_value:
+                    channel_names.append(channel.name)
+                    for cmd in channel.get_commands(MessageLookupType.LAST_WRITE):
+                        channel_cmds.append(cmd)
+
+            self.log(f"CHs: [{(','.join(channel_names))}]")
+            for cmd in channel_cmds:
+                cmd.dump()
+                
+    def get_last_read_command(self, pending_irq):
+        cmds = []
+        scanned_channels = []
+        if self.channel_list and len(self.channel_list) > 0:
+            cidx = 0
+            for channel in self.channel_list:
+                if (pending_irq >> (channel.type & 1)) != 0:
+                    scanned_channels.append(channel.name)
+                    for cmd in channel.get_commands(MessageLookupType.LAST_READ):
+                        cmds.append(cmd)
+                cidx = cidx + 1 
+        
+        if len(scanned_channels) > 0:
+            self.log(f"CHs: [{(','.join(scanned_channels))}]")
+            for cmd in cmds:
+                cmd.dump()
 
     def start(self):
         super().start()
